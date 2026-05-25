@@ -10,14 +10,3 @@ export const PROJECTS_JSON = join(PROJECT_ROOT, 'projects.json');
 export const DB_PATH = join(PROJECT_ROOT, 'sessions.db');
 
 export const HOME = homedir();
-
-export const DEFAULT_ALLOWED_TOOLS = [
-  'Read',
-  'Write',
-  'Edit',
-  'Bash',
-  'Glob',
-  'Grep',
-  'WebFetch',
-  'Task',
-];

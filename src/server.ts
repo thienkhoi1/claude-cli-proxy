@@ -5,7 +5,7 @@ import Fastify from 'fastify';
 import fastifySwagger from '@fastify/swagger';
 import fastifySwaggerUi from '@fastify/swagger-ui';
 import { mkdirSync } from 'node:fs';
-import { HOST, PORT, WORKSPACES_DIR, DEFAULT_ALLOWED_TOOLS } from './config.js';
+import { HOST, PORT, WORKSPACES_DIR } from './config.js';
 import { sdkRunner } from './claude-sdk.js';
 import { ensureWorkspace } from './workspaces.js';
 import {
@@ -98,7 +98,11 @@ app.post<{ Body: ChatBody }>(
           allowedTools: {
             type: 'array',
             items: { type: 'string' },
-            description: `Optional per-call override. Default: ${DEFAULT_ALLOWED_TOOLS.join(', ')}.`,
+            description:
+              'Optional per-call override. When omitted, the same default toolset as the ' +
+              'interactive `claude` CLI on this machine is used (currently: Task, TaskOutput, ' +
+              'Bash, Glob, Grep, ExitPlanMode, Read, Edit, Write, NotebookEdit, WebFetch, ' +
+              'TodoWrite, WebSearch, KillShell, AskUserQuestion, Skill, EnterPlanMode, LSP).',
           },
         },
       },

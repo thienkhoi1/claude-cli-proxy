@@ -115,8 +115,8 @@ export const PLAYGROUND_HTML = `<!doctype html>
     <input id="sessionId" value="demo" placeholder="my-session" />
     <label for="prompt">Prompt</label>
     <textarea id="prompt" placeholder="Ask Claude to do something...">create a file hello.txt with the content "world" and confirm</textarea>
-    <label for="allowed">Allowed tools (comma-separated, blank = default)</label>
-    <input id="allowed" placeholder="Read, Write, Edit, Bash, Glob, Grep, WebFetch, Task" />
+    <label for="allowed">Allowed tools (comma-separated, blank = same as <code>claude</code> CLI)</label>
+    <input id="allowed" placeholder="leave blank for CLI default" />
     <div class="toolbar">
       <button id="sendBtn">Send</button>
       <button id="stopBtn" class="secondary" disabled>Stop</button>

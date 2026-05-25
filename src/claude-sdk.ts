@@ -1,6 +1,5 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { DEFAULT_ALLOWED_TOOLS } from './config.js';
 
 export interface RunOptions {
   prompt: string;
@@ -22,7 +21,9 @@ export const sdkRunner: ClaudeRunner = {
         cwd,
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
-        allowedTools: allowedTools ?? DEFAULT_ALLOWED_TOOLS,
+        // Omit `allowedTools` when the caller hasn't overridden it so the SDK
+        // uses the same default toolset as the interactive `claude` CLI.
+        ...(allowedTools ? { allowedTools } : {}),
         ...(resume ? { resume } : {}),
         ...(signal ? { abortController: toAbortController(signal) } : {}),
       },
