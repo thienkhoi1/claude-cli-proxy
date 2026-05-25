@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "setup": "bash scripts/setup.sh",
     "smoke": "tsx src/test-auth.ts",
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
