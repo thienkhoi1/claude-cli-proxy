@@ -17,6 +17,7 @@ import {
   upsertSession,
 } from './sessions.js';
 import { PLAYGROUND_HTML } from './playground.js';
+import { registerOpenAIRoutes } from './openai-compat.js';
 
 mkdirSync(WORKSPACES_DIR, { recursive: true });
 
@@ -37,6 +38,7 @@ await app.register(fastifySwagger, {
     servers: [{ url: `http://${HOST}:${PORT}` }],
     tags: [
       { name: 'chat', description: 'Streaming chat with Claude' },
+      { name: 'openai', description: 'OpenAI-compatible API (for OpenClaw, OpenAI SDK, etc.)' },
       { name: 'sessions', description: 'Session management' },
       { name: 'meta', description: 'Server metadata' },
     ],
@@ -277,6 +279,8 @@ app.get(
   async () => ({ ok: true }),
 );
 
+registerOpenAIRoutes(app);
+
 app.get('/playground', { schema: { hide: true } }, async (_req, reply) => {
   reply.type('text/html; charset=utf-8').send(PLAYGROUND_HTML);
 });
@@ -293,9 +297,10 @@ app.get('/', { schema: { hide: true } }, async (_req, reply) => {
       </head><body><div class="card">
       <h1>Claude CLI Proxy</h1>
       <p>Local HTTP gateway for Claude Code running on this machine.</p>
-      <a href="/docs">📘 OpenAPI Docs (Swagger UI)</a>
-      <a href="/playground">⚡ Live Streaming Playground</a>
-      <a href="/health">🩺 Health</a>
+      <a href="/docs">OpenAPI Docs (Swagger UI)</a>
+      <a href="/playground">Live Streaming Playground</a>
+      <a href="/v1/models">OpenAI-compatible API (/v1) — model: khoi-local</a>
+      <a href="/health">Health</a>
       </div></body></html>`,
   );
 });
