@@ -1,11 +1,22 @@
 import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
-import { sdkRunner } from './claude-sdk.js';
+import { sdkRunner, listSupportedModels } from './claude-sdk.js';
 import { ensureWorkspace } from './workspaces.js';
 import { getSession, setClaudeSessionId, upsertSession } from './sessions.js';
 
 export const KHOI_LOCAL_MODEL_ID = 'khoi-local';
 const DEFAULT_SESSION_ID = 'openclaw';
+
+// "khoi-local" is just the OpenClaw alias for "whatever the local CLI picks" — when
+// callers send it as the model id we treat it as "use CLI default" and pass nothing
+// to the SDK. Real Claude model ids/aliases (default, sonnet, haiku, claude-*) are
+// forwarded verbatim.
+function normaliseModel(model: string | undefined): string | undefined {
+  if (!model) return undefined;
+  const m = model.trim();
+  if (!m || m === KHOI_LOCAL_MODEL_ID) return undefined;
+  return m;
+}
 
 interface OpenAIContentPart {
   type: string;
@@ -62,6 +73,8 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
       schema: {
         tags: ['openai'],
         summary: 'List models (OpenAI-compatible)',
+        description:
+          'Returns the `khoi-local` alias plus every model the local Claude CLI exposes.',
         response: {
           200: {
             type: 'object',
@@ -84,17 +97,21 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
         },
       },
     },
-    async () => ({
-      object: 'list',
-      data: [
-        {
-          id: KHOI_LOCAL_MODEL_ID,
-          object: 'model',
-          created: Math.floor(Date.now() / 1000),
-          owned_by: 'local',
-        },
-      ],
-    }),
+    async () => {
+      const created = Math.floor(Date.now() / 1000);
+      const data: Array<{ id: string; object: 'model'; created: number; owned_by: string }> = [
+        { id: KHOI_LOCAL_MODEL_ID, object: 'model', created, owned_by: 'local' },
+      ];
+      try {
+        const cliModels = await listSupportedModels();
+        for (const m of cliModels) {
+          data.push({ id: m.value, object: 'model', created, owned_by: 'claude-cli' });
+        }
+      } catch {
+        // If the CLI probe fails we still return at least the alias so OpenClaw works.
+      }
+      return { object: 'list', data };
+    },
   );
 
   app.post<{ Body: ChatCompletionsBody }>(
@@ -112,8 +129,11 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
           'only the latest user turn (plus any system messages) is forwarded.\n' +
           '- When `stream: true`, responds with OpenAI-format SSE chunks ' +
           '(`chat.completion.chunk` + `data: [DONE]`).\n' +
-          '- The `model` field is accepted for compatibility but ignored — the underlying ' +
-          'Claude model is whatever the local CLI/SDK is configured to use.',
+          '- The `model` field selects the Claude model. `khoi-local` (or omitted) means ' +
+          '"whatever the local CLI defaults to". Other accepted values include the aliases ' +
+          'and ids returned by `GET /v1/models` (`default`, `sonnet`, `haiku`, full Claude ' +
+          'model ids, etc.). Unknown values are forwarded verbatim and the SDK will error ' +
+          'if invalid.',
         body: {
           type: 'object',
           required: ['messages'],
@@ -178,11 +198,13 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
 
       let capturedClaudeId: string | null = existing?.claudeSessionId ?? null;
 
+      const requestedModel = normaliseModel(body.model);
       const runClaude = async function* () {
         const stream = sdkRunner.run({
           prompt,
           cwd: workspace,
           resume: capturedClaudeId,
+          model: requestedModel,
           signal: abort.signal,
         });
         for await (const msg of stream) {

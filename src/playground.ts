@@ -113,6 +113,8 @@ export const PLAYGROUND_HTML = `<!doctype html>
     <h2>Request</h2>
     <label for="sessionId">Session ID</label>
     <input id="sessionId" value="demo" placeholder="my-session" />
+    <label for="model">Model</label>
+    <select id="model"><option value="">(CLI default)</option></select>
     <label for="prompt">Prompt</label>
     <textarea id="prompt" placeholder="Ask Claude to do something...">create a file hello.txt with the content "world" and confirm</textarea>
     <label for="allowed">Allowed tools (comma-separated, blank = same as <code>claude</code> CLI)</label>
@@ -208,6 +210,7 @@ function renderEvent(eventName, payload) {
 async function send() {
   const sessionId = $('sessionId').value.trim();
   const prompt = $('prompt').value;
+  const model = $('model').value.trim();
   const allowedRaw = $('allowed').value.trim();
   if (!sessionId || !prompt) return;
   const allowedTools = allowedRaw ? allowedRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined;
@@ -223,7 +226,12 @@ async function send() {
     const res = await fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId, prompt, ...(allowedTools ? { allowedTools } : {}) }),
+      body: JSON.stringify({
+        sessionId,
+        prompt,
+        ...(model ? { model } : {}),
+        ...(allowedTools ? { allowedTools } : {}),
+      }),
       signal: abortCtrl.signal,
     });
     if (!res.ok || !res.body) {
@@ -327,11 +335,28 @@ sessionsEl.addEventListener('click', async (ev) => {
   }
 });
 
+async function loadModels() {
+  try {
+    const res = await fetch('/models');
+    const { models } = await res.json();
+    const sel = $('model');
+    for (const m of (models || [])) {
+      const opt = document.createElement('option');
+      opt.value = m.value;
+      opt.textContent = m.displayName + ' (' + m.value + ')';
+      sel.appendChild(opt);
+    }
+  } catch (err) {
+    // Leave just the default option in the dropdown.
+  }
+}
+
 sendBtn.addEventListener('click', send);
 stopBtn.addEventListener('click', stop);
 clearBtn.addEventListener('click', clearStream);
 refreshBtn.addEventListener('click', refreshSessions);
 refreshSessions();
+loadModels();
 </script>
 </body>
 </html>`;

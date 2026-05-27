@@ -1,10 +1,11 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { SDKMessage, ModelInfo } from '@anthropic-ai/claude-agent-sdk';
 
 export interface RunOptions {
   prompt: string;
   cwd: string;
   resume?: string | null;
+  model?: string;
   allowedTools?: string[];
   signal?: AbortSignal;
 }
@@ -14,15 +15,16 @@ export interface ClaudeRunner {
 }
 
 export const sdkRunner: ClaudeRunner = {
-  run({ prompt, cwd, resume, allowedTools, signal }) {
+  run({ prompt, cwd, resume, model, allowedTools, signal }) {
     const q = query({
       prompt,
       options: {
         cwd,
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
-        // Omit `allowedTools` when the caller hasn't overridden it so the SDK
-        // uses the same default toolset as the interactive `claude` CLI.
+        // Each of these is only forwarded when the caller provided it, so the SDK
+        // falls back to whatever the interactive `claude` CLI on this machine uses.
+        ...(model ? { model } : {}),
         ...(allowedTools ? { allowedTools } : {}),
         ...(resume ? { resume } : {}),
         ...(signal ? { abortController: toAbortController(signal) } : {}),
@@ -37,4 +39,33 @@ function toAbortController(signal: AbortSignal): AbortController {
   if (signal.aborted) ac.abort();
   else signal.addEventListener('abort', () => ac.abort(), { once: true });
   return ac;
+}
+
+// Cached promise so concurrent callers share one fetch and the result is stable
+// for the lifetime of the process. Resets on error so the next call retries.
+let modelsCache: Promise<ModelInfo[]> | null = null;
+
+export function listSupportedModels(): Promise<ModelInfo[]> {
+  if (!modelsCache) {
+    modelsCache = (async () => {
+      const ac = new AbortController();
+      const q = query({
+        prompt: 'list-models-probe',
+        options: {
+          permissionMode: 'bypassPermissions',
+          allowDangerouslySkipPermissions: true,
+          abortController: ac,
+        },
+      });
+      try {
+        return await q.supportedModels();
+      } finally {
+        ac.abort();
+      }
+    })().catch((err) => {
+      modelsCache = null;
+      throw err;
+    });
+  }
+  return modelsCache;
 }

@@ -6,7 +6,7 @@ import fastifySwagger from '@fastify/swagger';
 import fastifySwaggerUi from '@fastify/swagger-ui';
 import { mkdirSync } from 'node:fs';
 import { HOST, PORT, WORKSPACES_DIR } from './config.js';
-import { sdkRunner } from './claude-sdk.js';
+import { sdkRunner, listSupportedModels } from './claude-sdk.js';
 import { ensureWorkspace } from './workspaces.js';
 import {
   closeDb,
@@ -65,6 +65,7 @@ const sessionRecordSchema = {
 interface ChatBody {
   sessionId: string;
   prompt: string;
+  model?: string;
   allowedTools?: string[];
 }
 
@@ -96,6 +97,12 @@ app.post<{ Body: ChatBody }>(
             type: 'string',
             description: 'The user message to send.',
             examples: ['create a file hello.txt with content: world'],
+          },
+          model: {
+            type: 'string',
+            description:
+              'Optional Claude model id (e.g. `sonnet`, `haiku`, `default`, or a full ' +
+              'model id). When omitted, the CLI default is used. See `GET /models`.',
           },
           allowedTools: {
             type: 'array',
@@ -168,6 +175,7 @@ app.post<{ Body: ChatBody }>(
         prompt: body.prompt,
         cwd: workspace,
         resume: session.claudeSessionId,
+        model: body.model,
         allowedTools: body.allowedTools,
         signal: abort.signal,
       });
@@ -277,6 +285,47 @@ app.get(
     },
   },
   async () => ({ ok: true }),
+);
+
+app.get(
+  '/models',
+  {
+    schema: {
+      tags: ['meta'],
+      summary: 'List Claude models available on this machine (proxied from the CLI)',
+      description:
+        'Reads the model list from the local Claude SDK. Use any returned `value` as ' +
+        'the `model` field in `POST /chat` or `POST /v1/chat/completions`.',
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            models: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  value: { type: 'string' },
+                  displayName: { type: 'string' },
+                  description: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
+        502: { type: 'object', properties: { error: { type: 'string' } } },
+      },
+    },
+  },
+  async (req, reply) => {
+    try {
+      const models = await listSupportedModels();
+      return { models };
+    } catch (err) {
+      req.log.error({ err }, 'listSupportedModels failed');
+      return reply.code(502).send({ error: (err as Error).message });
+    }
+  },
 );
 
 registerOpenAIRoutes(app);
