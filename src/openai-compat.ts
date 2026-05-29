@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { listSupportedModels } from './claude-sdk.js';
 import { activeRunner } from './runner.js';
 import { ensureWorkspace } from './workspaces.js';
-import { getSession, setClaudeSessionId, upsertSession } from './sessions.js';
+import { setClaudeSessionId, upsertSession } from './sessions.js';
 import { runLocalToolChat, type OpenAITool } from './openai-tools-bridge.js';
 
 export const KHOI_LOCAL_MODEL_ID = 'khoi-local';
@@ -68,6 +68,17 @@ function flattenMessages(messages: OpenAIMessage[]): string {
       const role = String(m.role || 'user').toUpperCase();
       return `${role}: ${text}`;
     })
+    .join('\n\n');
+}
+
+// Flatten the FULL conversation (excluding system messages, which are passed
+// separately as the system prompt). OpenClaw sends the complete history on every
+// request, so we stay stateless — no Claude session resume — which keeps separate
+// OpenClaw conversations from merging into one shared thread.
+function flattenConversation(messages: OpenAIMessage[]): string {
+  return messages
+    .filter((m) => m.role !== 'system')
+    .map((m) => `${String(m.role || 'user').toUpperCase()}: ${contentToText(m.content)}`)
     .join('\n\n');
 }
 
@@ -198,7 +209,6 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
         });
       }
 
-      const existing = getSession(sessionId);
       upsertSession(sessionId, workspace);
 
       const completionId = `chatcmpl-${randomUUID()}`;
@@ -220,16 +230,17 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
           .filter((m) => m.role === 'system')
           .map((m) => contentToText(m.content))
           .join('\n\n');
-        const resumedTool = Boolean(existing?.claudeSessionId);
 
         let result;
         try {
+          // Stateless: send the full conversation each call, no resume, so distinct
+          // OpenClaw conversations never merge into a single shared Claude thread.
           result = await runLocalToolChat({
             cwd: workspace,
-            resume: existing?.claudeSessionId ?? null,
+            resume: null,
             model: normaliseModel(body.model),
             systemPrompt: systems || undefined,
-            prompt: buildPrompt(body.messages, resumedTool),
+            prompt: flattenConversation(body.messages),
             requestedTools: body.tools,
             signal: abort.signal,
           });
@@ -243,8 +254,6 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
           }
           return reply.code(500).send({ error: { message: msg, type: 'internal_error' } });
         }
-
-        if (result.claudeSessionId) setClaudeSessionId(sessionId, result.claudeSessionId);
 
         if (body.stream) {
           reply.raw.writeHead(200, {
@@ -281,17 +290,19 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
         });
       }
 
-      const resumed = Boolean(existing?.claudeSessionId);
-      const prompt = buildPrompt(body.messages, resumed);
+      // Stateless: OpenClaw/OpenAI clients resend the full history each call, so we
+      // flatten it and do NOT resume — otherwise every conversation would share the
+      // single `openclaw` session's Claude thread and merge together.
+      const prompt = buildPrompt(body.messages, false);
 
-      let capturedClaudeId: string | null = existing?.claudeSessionId ?? null;
+      let capturedClaudeId: string | null = null;
 
       const requestedModel = normaliseModel(body.model);
       const runClaude = async function* () {
         const stream = activeRunner.run({
           prompt,
           cwd: workspace,
-          resume: capturedClaudeId,
+          resume: null,
           model: requestedModel,
           appendSystemPrompt: AGENT_DIRECTIVE,
           signal: abort.signal,
