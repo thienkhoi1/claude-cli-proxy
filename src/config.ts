@@ -5,6 +5,11 @@ import { join } from 'node:path';
 export const HOST = '127.0.0.1';
 export const PORT = 3000;
 
+// Default Claude model for requests that don't specify one (e.g. OpenClaw, which
+// sends the `khoi-local` alias). Per-machine via PROXY_DEFAULT_MODEL. When unset,
+// the CLI's own default model is used. Example: claude-sonnet-4-6.
+export const DEFAULT_MODEL = process.env.PROXY_DEFAULT_MODEL || undefined;
+
 export const PROJECT_ROOT = process.cwd();
 export const WORKSPACES_DIR = join(PROJECT_ROOT, 'workspaces');
 export const PROJECTS_JSON = join(PROJECT_ROOT, 'projects.json');

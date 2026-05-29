@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { ClaudeRunner, RunOptions } from './claude-sdk.js';
-import { CLAUDE_CLI_PATH } from './config.js';
+import { CLAUDE_CLI_PATH, DEFAULT_MODEL } from './config.js';
 
 export interface CliRunOptions {
   prompt: string;
@@ -28,7 +28,9 @@ export async function* runClaudeCli(opts: CliRunOptions): AsyncGenerator<Record<
     '--verbose',
     '--dangerously-skip-permissions',
   ];
-  if (opts.model) args.push('--model', opts.model);
+  // Per-request model wins; otherwise fall back to the machine default (if set).
+  const model = opts.model || DEFAULT_MODEL;
+  if (model) args.push('--model', model);
   if (opts.resume) args.push('--resume', opts.resume);
   if (opts.appendSystemPrompt) {
     const dir = mkdtempSync(join(tmpdir(), 'ccp-sys-'));
