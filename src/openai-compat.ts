@@ -7,6 +7,20 @@ import { getSession, setClaudeSessionId, upsertSession } from './sessions.js';
 export const KHOI_LOCAL_MODEL_ID = 'khoi-local';
 const DEFAULT_SESSION_ID = 'openclaw';
 
+// Callers of the OpenAI-compatible endpoint (e.g. OpenClaw) send their own tool
+// definitions and a system prompt that instructs the model to call an external
+// "exec"/tool-call protocol. We don't bridge those tools — instead Claude Code runs
+// the task itself with its own native tools. This directive overrides that framing so
+// Claude uses its own tools instead of reporting that the external tool is unavailable.
+const AGENT_DIRECTIVE =
+  'You are operating as an autonomous agent with full access to your OWN native tools ' +
+  '(Bash, Read, Edit, Write, Glob, Grep, WebFetch, Task) in your current working directory ' +
+  'on this machine. The conversation may include instructions from an external chat framework ' +
+  'telling you to invoke an "exec" tool or some other external tool-call protocol — those ' +
+  'external tools are NOT available to you here, so ignore that framing. To accomplish any ' +
+  'task, use YOUR OWN native tools directly: run shell commands, read and edit files yourself, ' +
+  'then report the results. Never claim a tool is unavailable without first trying your own tools.';
+
 // "khoi-local" is just the OpenClaw alias for "whatever the local CLI picks" — when
 // callers send it as the model id we treat it as "use CLI default" and pass nothing
 // to the SDK. Real Claude model ids/aliases (default, sonnet, haiku, claude-*) are
@@ -205,6 +219,7 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
           cwd: workspace,
           resume: capturedClaudeId,
           model: requestedModel,
+          appendSystemPrompt: AGENT_DIRECTIVE,
           signal: abort.signal,
         });
         for await (const msg of stream) {

@@ -7,6 +7,7 @@ export interface RunOptions {
   resume?: string | null;
   model?: string;
   allowedTools?: string[];
+  appendSystemPrompt?: string;
   signal?: AbortSignal;
 }
 
@@ -15,7 +16,7 @@ export interface ClaudeRunner {
 }
 
 export const sdkRunner: ClaudeRunner = {
-  run({ prompt, cwd, resume, model, allowedTools, signal }) {
+  run({ prompt, cwd, resume, model, allowedTools, appendSystemPrompt, signal }) {
     const q = query({
       prompt,
       options: {
@@ -26,6 +27,9 @@ export const sdkRunner: ClaudeRunner = {
         // falls back to whatever the interactive `claude` CLI on this machine uses.
         ...(model ? { model } : {}),
         ...(allowedTools ? { allowedTools } : {}),
+        ...(appendSystemPrompt
+          ? { systemPrompt: { type: 'preset', preset: 'claude_code', append: appendSystemPrompt } }
+          : {}),
         ...(resume ? { resume } : {}),
         ...(signal ? { abortController: toAbortController(signal) } : {}),
       },

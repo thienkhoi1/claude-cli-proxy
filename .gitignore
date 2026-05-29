@@ -30,3 +30,5 @@ yarn-error.log*
 pnpm-debug.log*
 
 projects.json
+
+machine-lan.md
