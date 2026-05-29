@@ -1,5 +1,6 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKMessage, ModelInfo } from '@anthropic-ai/claude-agent-sdk';
+import { CLAUDE_CLI_PATH } from './config.js';
 
 export interface RunOptions {
   prompt: string;
@@ -31,6 +32,7 @@ export const sdkRunner: ClaudeRunner = {
           ? { systemPrompt: { type: 'preset', preset: 'claude_code', append: appendSystemPrompt } }
           : {}),
         ...(resume ? { resume } : {}),
+        ...(CLAUDE_CLI_PATH ? { pathToClaudeCodeExecutable: CLAUDE_CLI_PATH } : {}),
         ...(signal ? { abortController: toAbortController(signal) } : {}),
       },
     });
@@ -58,6 +60,7 @@ export function listSupportedModels(): Promise<ModelInfo[]> {
         options: {
           permissionMode: 'bypassPermissions',
           allowDangerouslySkipPermissions: true,
+          ...(CLAUDE_CLI_PATH ? { pathToClaudeCodeExecutable: CLAUDE_CLI_PATH } : {}),
           abortController: ac,
         },
       });

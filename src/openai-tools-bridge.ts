@@ -11,6 +11,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { isAbsolute, resolve as resolvePath } from 'node:path';
 import { query, createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
+import { CLAUDE_CLI_PATH } from './config.js';
 
 export interface OpenAITool {
   type?: string;
@@ -200,6 +201,7 @@ export async function runLocalToolChat(p: LocalToolChatParams): Promise<LocalToo
       ...(p.model ? { model: p.model } : {}),
       ...(p.systemPrompt ? { systemPrompt: p.systemPrompt } : {}),
       ...(p.resume ? { resume: p.resume } : {}),
+      ...(CLAUDE_CLI_PATH ? { pathToClaudeCodeExecutable: CLAUDE_CLI_PATH } : {}),
       ...(p.signal ? { abortController: toAbort(p.signal) } : {}),
     },
   });
