@@ -47,32 +47,15 @@ function toAbortController(signal: AbortSignal): AbortController {
   return ac;
 }
 
-// Cached promise so concurrent callers share one fetch and the result is stable
-// for the lifetime of the process. Resets on error so the next call retries.
-let modelsCache: Promise<ModelInfo[]> | null = null;
-
+// Standard Claude Code model aliases. We intentionally do NOT probe the SDK for
+// this anymore: the SDK probe (a query()+abort) could throw an async AbortError
+// from its transport that crashed the whole proxy, and we run on the CLI engine
+// now anyway. `default` resolves to whatever the local CLI is configured to use.
 export function listSupportedModels(): Promise<ModelInfo[]> {
-  if (!modelsCache) {
-    modelsCache = (async () => {
-      const ac = new AbortController();
-      const q = query({
-        prompt: 'list-models-probe',
-        options: {
-          permissionMode: 'bypassPermissions',
-          allowDangerouslySkipPermissions: true,
-          ...(CLAUDE_CLI_PATH ? { pathToClaudeCodeExecutable: CLAUDE_CLI_PATH } : {}),
-          abortController: ac,
-        },
-      });
-      try {
-        return await q.supportedModels();
-      } finally {
-        ac.abort();
-      }
-    })().catch((err) => {
-      modelsCache = null;
-      throw err;
-    });
-  }
-  return modelsCache;
+  return Promise.resolve([
+    { value: 'default', displayName: 'Default (CLI default)', description: 'Whatever the local claude CLI uses by default' },
+    { value: 'opus', displayName: 'Opus', description: 'Most capable' },
+    { value: 'sonnet', displayName: 'Sonnet', description: 'Balanced' },
+    { value: 'haiku', displayName: 'Haiku', description: 'Fastest' },
+  ]);
 }

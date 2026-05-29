@@ -24,6 +24,16 @@ mkdirSync(WORKSPACES_DIR, { recursive: true });
 
 const app = Fastify({ logger: true });
 
+// Safety net: a single-user local proxy must stay up so the assistant (e.g. the
+// OpenClaw Telegram bot) keeps working. Never let a stray async error from a
+// child process / SDK transport crash the whole server — log and keep running.
+process.on('uncaughtException', (err) => {
+  app.log.error({ err }, 'uncaughtException (kept alive)');
+});
+process.on('unhandledRejection', (reason) => {
+  app.log.error({ reason }, 'unhandledRejection (kept alive)');
+});
+
 await app.register(fastifySwagger, {
   openapi: {
     info: {
