@@ -5,9 +5,10 @@ import Fastify from 'fastify';
 import fastifySwagger from '@fastify/swagger';
 import fastifySwaggerUi from '@fastify/swagger-ui';
 import { mkdirSync } from 'node:fs';
-import { HOST, PORT, WORKSPACES_DIR } from './config.js';
+import { existsSync } from 'node:fs';
+import { HOST, PORT, WORKSPACES_DIR, CLAUDE_CLI_PATH } from './config.js';
 import { listSupportedModels } from './claude-sdk.js';
-import { activeRunner } from './runner.js';
+import { activeRunner, ENGINE } from './runner.js';
 import { ensureWorkspace } from './workspaces.js';
 import {
   closeDb,
@@ -285,6 +286,12 @@ app.delete<{ Params: { id: string } }>(
     return { deleted: req.params.id };
   },
 );
+
+app.get('/debug/engine', { schema: { hide: true } }, async () => ({
+  engine: ENGINE,
+  claudeCliPath: CLAUDE_CLI_PATH ?? null,
+  claudeCliExists: CLAUDE_CLI_PATH ? existsSync(CLAUDE_CLI_PATH) : false,
+}));
 
 app.get(
   '/health',
