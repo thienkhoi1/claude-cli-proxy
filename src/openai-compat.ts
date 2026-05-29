@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { sdkRunner, listSupportedModels } from './claude-sdk.js';
 import { ensureWorkspace } from './workspaces.js';
 import { getSession, setClaudeSessionId, upsertSession } from './sessions.js';
-import { handleToolChat, type OpenAITool } from './openai-tools-bridge.js';
+import { runLocalToolChat, type OpenAITool } from './openai-tools-bridge.js';
 
 export const KHOI_LOCAL_MODEL_ID = 'khoi-local';
 const DEFAULT_SESSION_ID = 'openclaw';
@@ -204,30 +204,33 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
       const created = Math.floor(Date.now() / 1000);
       const modelEcho = body.model || KHOI_LOCAL_MODEL_ID;
 
-      // Tool-calling bridge: when the caller (OpenClaw) sends tool definitions, route
-      // through the bridge so those tools fire via OpenAI tool_calls instead of Claude
-      // using its own native tools.
+      const abort = new AbortController();
+      const onClose = () => {
+        if (!reply.raw.writableEnded) abort.abort();
+      };
+      reply.raw.on('close', onClose);
+
+      // Tool mode: when the caller (OpenClaw) sends tool definitions, register the
+      // executable ones (exec/read/write/edit/web_fetch) as LOCAL-running tools so
+      // Claude Code performs the work on this machine. The whole turn finishes here;
+      // OpenClaw just receives the final text.
       if (Array.isArray(body.tools) && body.tools.length > 0) {
         const systems = body.messages
           .filter((m) => m.role === 'system')
           .map((m) => contentToText(m.content))
           .join('\n\n');
-        const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
-        const promptForNewTurn = lastUser
-          ? contentToText(lastUser.content)
-          : flattenMessages(body.messages);
+        const resumedTool = Boolean(existing?.claudeSessionId);
 
         let result;
         try {
-          result = await handleToolChat({
-            sessionId,
+          result = await runLocalToolChat({
             cwd: workspace,
             resume: existing?.claudeSessionId ?? null,
             model: normaliseModel(body.model),
             systemPrompt: systems || undefined,
-            promptForNewTurn,
-            messages: body.messages,
-            tools: body.tools,
+            prompt: buildPrompt(body.messages, resumedTool),
+            requestedTools: body.tools,
+            signal: abort.signal,
           });
         } catch (err) {
           const msg = (err as Error).message;
@@ -242,12 +245,6 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
 
         if (result.claudeSessionId) setClaudeSessionId(sessionId, result.claudeSessionId);
 
-        const toolCalls = result.toolCalls?.map((c) => ({
-          id: c.id,
-          type: 'function' as const,
-          function: { name: c.name, arguments: c.arguments },
-        }));
-
         if (body.stream) {
           reply.raw.writeHead(200, {
             'Content-Type': 'text/event-stream',
@@ -261,8 +258,7 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
             );
           chunk({ role: 'assistant' });
           if (result.content) chunk({ content: result.content });
-          if (toolCalls) chunk({ tool_calls: toolCalls.map((c, index) => ({ index, ...c })) });
-          chunk({}, result.finishReason);
+          chunk({}, 'stop');
           reply.raw.write('data: [DONE]\n\n');
           reply.raw.end();
           return reply;
@@ -276,12 +272,8 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
           choices: [
             {
               index: 0,
-              message: {
-                role: 'assistant',
-                content: result.content || null,
-                ...(toolCalls ? { tool_calls: toolCalls } : {}),
-              },
-              finish_reason: result.finishReason,
+              message: { role: 'assistant', content: result.content || '' },
+              finish_reason: 'stop',
             },
           ],
           usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
@@ -290,12 +282,6 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
 
       const resumed = Boolean(existing?.claudeSessionId);
       const prompt = buildPrompt(body.messages, resumed);
-
-      const abort = new AbortController();
-      const onClose = () => {
-        if (!reply.raw.writableEnded) abort.abort();
-      };
-      reply.raw.on('close', onClose);
 
       let capturedClaudeId: string | null = existing?.claudeSessionId ?? null;
 

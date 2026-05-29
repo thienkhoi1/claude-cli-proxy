@@ -1,357 +1,233 @@
-// Bridges OpenAI tool-calling (used by OpenClaw) to the Claude Agent SDK.
+// Lets OpenClaw drive the assistant while Claude Code does the work LOCALLY.
 //
-// OpenClaw sends OpenAI ChatCompletions requests with `tools[]` and expects the
-// model to return `tool_calls`; it then executes the tools and sends the results
-// back in a follow-up request. The Agent SDK can't natively emit "deferred" tool
-// calls, so we register OpenClaw's tools as SDK MCP tools whose handlers BLOCK:
-// when Claude calls one we surface it as an OpenAI tool_call, then await the
-// result OpenClaw returns in its next request, then let Claude continue.
-//
-// A live `query()` is held per session for the duration of one user turn's
-// tool-call loop (start -> tool_calls -> results -> ... -> final text), then closed.
+// OpenClaw's system prompt tells the model to call tools by name (exec, read,
+// write, edit, web_fetch, ...). Rather than round-tripping those calls back to
+// OpenClaw, we register tools with the SAME NAMES whose handlers execute directly
+// on this machine (Claude Code already runs with bypassPermissions). Claude calls
+// e.g. `exec` -> we run it here -> return the output -> Claude continues. The whole
+// turn finishes in a single request, so there is no cross-request state to keep.
+import { execFile } from 'node:child_process';
+import { readFile, writeFile } from 'node:fs/promises';
+import { isAbsolute, resolve as resolvePath } from 'node:path';
 import { query, createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 
 export interface OpenAITool {
   type?: string;
-  function: { name: string; description?: string; parameters?: JsonSchema };
+  function: { name: string; description?: string; parameters?: Record<string, unknown> };
 }
-export interface OpenAIMessage {
-  role: string;
-  content?: unknown;
-  tool_call_id?: string;
-  tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>;
-}
-type JsonSchema = Record<string, unknown> | undefined;
 
-export interface ToolChatParams {
-  sessionId: string;
+export interface LocalToolChatParams {
   cwd: string;
   resume: string | null;
   model?: string;
   systemPrompt?: string;
-  promptForNewTurn: string;
-  messages: ReadonlyArray<{ role: string; content?: unknown; tool_call_id?: string }>;
-  tools: OpenAITool[];
+  prompt: string;
+  requestedTools: OpenAITool[];
+  signal?: AbortSignal;
 }
-export interface ToolChatResult {
-  finishReason: 'tool_calls' | 'stop';
+export interface LocalToolChatResult {
   content: string;
-  toolCalls?: Array<{ id: string; name: string; arguments: string }>;
   claudeSessionId: string | null;
 }
 
-const MCP_SERVER = 'openclaw';
-const BRIDGE_TTL_MS = 5 * 60 * 1000;
+const MCP_SERVER = 'local';
+const EXEC_TIMEOUT_MS = 120_000;
+const MAX_OUTPUT = 60_000;
 
-// ---------------------------------------------------------------------------
-// JSON Schema -> zod (covers the surface OpenClaw uses: string/number/boolean/
-// array/object, enum, required, default, min/max, patternProperties)
-// ---------------------------------------------------------------------------
-function jsToZod(schema: JsonSchema): z.ZodTypeAny {
-  if (!schema || typeof schema !== 'object') return z.any();
-  const rawType = (schema as { type?: unknown }).type;
-  const t = Array.isArray(rawType) ? (rawType[0] as string) : (rawType as string | undefined);
-  let zt: z.ZodTypeAny;
-  switch (t) {
-    case 'string': {
-      const en = (schema as { enum?: unknown }).enum;
-      if (Array.isArray(en) && en.length > 0 && en.every((v) => typeof v === 'string')) {
-        zt = z.enum(en as [string, ...string[]]);
-      } else {
-        zt = z.string();
-      }
-      break;
-    }
-    case 'integer':
-    case 'number':
-      zt = z.number();
-      break;
-    case 'boolean':
-      zt = z.boolean();
-      break;
-    case 'array': {
-      const items = (schema as { items?: JsonSchema }).items;
-      zt = z.array(items ? jsToZod(items) : z.any());
-      break;
-    }
-    case 'object':
-      zt = objectToZod(schema);
-      break;
-    default:
-      zt = z.any();
-  }
-  const desc = (schema as { description?: unknown }).description;
-  if (typeof desc === 'string') zt = zt.describe(desc);
-  return zt;
+function clip(s: string): string {
+  return s.length > MAX_OUTPUT ? s.slice(0, MAX_OUTPUT) + `\n…[truncated ${s.length - MAX_OUTPUT} chars]` : s;
 }
 
-function objectToZod(schema: JsonSchema): z.ZodTypeAny {
-  const shape = shapeFromProps(schema);
-  let obj = z.object(shape);
-  const ap = (schema as { additionalProperties?: unknown }).additionalProperties;
-  const pp = (schema as { patternProperties?: unknown }).patternProperties;
-  if (ap !== false || pp) obj = obj.passthrough();
-  return obj;
+function abs(cwd: string, p: string | undefined): string {
+  const path = p ?? '.';
+  return isAbsolute(path) ? path : resolvePath(cwd, path);
 }
 
-// Returns a zod raw shape ({ [k]: ZodType }) for tool()'s inputSchema arg.
-function shapeFromProps(parameters: JsonSchema): Record<string, z.ZodTypeAny> {
-  const props = (parameters as { properties?: Record<string, JsonSchema> } | undefined)?.properties ?? {};
-  const required = ((parameters as { required?: unknown } | undefined)?.required as string[]) ?? [];
-  const shape: Record<string, z.ZodTypeAny> = {};
-  for (const [key, propSchema] of Object.entries(props)) {
-    let zt = jsToZod(propSchema);
-    if (!required.includes(key)) zt = zt.optional();
-    shape[key] = zt;
-  }
-  return shape;
-}
+// Build the local-executing tools, bound to a working directory. Only the tools
+// OpenClaw asked for (and that we can run locally) are registered; everything else
+// (its sessions_/memory_/subagents/etc.) Claude simply doesn't get and works around
+// with exec.
+function buildLocalTools(cwd: string) {
+  const text = (s: string) => ({ content: [{ type: 'text' as const, text: clip(s) }] });
 
-// ---------------------------------------------------------------------------
-// Per-session bridge state
-// ---------------------------------------------------------------------------
-type Outcome =
-  | { type: 'tool_calls'; text: string; calls: Array<{ id: string; name: string; arguments: string }> }
-  | { type: 'final'; text: string }
-  | { type: 'error'; error: string };
-
-interface Bridge {
-  sessionId: string;
-  abort: AbortController;
-  claudeSessionId: string | null;
-  pending: Map<string, (result: string) => void>;
-  collected: Array<{ id: string; name: string; arguments: string }>;
-  expected: number;
-  accumText: string;
-  outcomeResolver: ((o: Outcome) => void) | null;
-  settled: boolean;
-  done: boolean;
-  timer: ReturnType<typeof setTimeout> | null;
-}
-
-const bridges = new Map<string, Bridge>();
-
-function newCallId(): string {
-  return 'call_' + Math.random().toString(36).slice(2, 14);
-}
-
-function touch(b: Bridge): void {
-  if (b.timer) clearTimeout(b.timer);
-  b.timer = setTimeout(() => abortBridge(b, 'ttl'), BRIDGE_TTL_MS);
-}
-
-function abortBridge(b: Bridge, reason: string): void {
-  if (b.done) return;
-  b.done = true;
-  if (b.timer) clearTimeout(b.timer);
-  for (const resolve of b.pending.values()) resolve(`[bridge aborted: ${reason}]`);
-  b.pending.clear();
-  if (b.outcomeResolver && !b.settled) {
-    b.settled = true;
-    const r = b.outcomeResolver;
-    b.outcomeResolver = null;
-    r({ type: 'error', error: `bridge aborted: ${reason}` });
-  }
-  try {
-    b.abort.abort();
-  } catch {
-    /* ignore */
-  }
-  if (bridges.get(b.sessionId) === b) bridges.delete(b.sessionId);
-}
-
-function settle(b: Bridge, outcome: Outcome): void {
-  if (b.settled || !b.outcomeResolver) return;
-  b.settled = true;
-  const r = b.outcomeResolver;
-  b.outcomeResolver = null;
-  r(outcome);
-}
-
-function maybeSettleToolCalls(b: Bridge): void {
-  if (b.settled || !b.outcomeResolver) return;
-  if (b.expected > 0 && b.collected.length >= b.expected) {
-    const calls = b.collected.slice();
-    const text = b.accumText;
-    b.collected = [];
-    b.expected = 0;
-    b.accumText = '';
-    settle(b, { type: 'tool_calls', text, calls });
-  }
-}
-
-function makeHandler(b: Bridge, toolName: string) {
-  return async (args: unknown) => {
-    const id = newCallId();
-    b.collected.push({ id, name: toolName, arguments: JSON.stringify(args ?? {}) });
-    const result = await new Promise<string>((resolve) => {
-      b.pending.set(id, resolve);
-      maybeSettleToolCalls(b);
-    });
-    return { content: [{ type: 'text' as const, text: result }] };
-  };
-}
-
-async function drive(b: Bridge, q: AsyncIterable<unknown>): Promise<void> {
-  try {
-    for await (const msg of q as AsyncIterable<Record<string, unknown>>) {
-      if (b.abort.signal.aborted) break;
-      const type = msg.type as string;
-      if (type === 'system' && (msg as { subtype?: string }).subtype === 'init') {
-        const sid = (msg as { session_id?: string }).session_id;
-        if (sid) b.claudeSessionId = sid;
-      } else if (type === 'assistant') {
-        const content = (msg as { message?: { content?: Array<Record<string, unknown>> } }).message?.content ?? [];
-        let toolUseCount = 0;
-        for (const block of content) {
-          if (block.type === 'text' && typeof block.text === 'string') b.accumText += block.text;
-          else if (block.type === 'tool_use') toolUseCount++;
-        }
-        if (toolUseCount > 0) {
-          b.expected = toolUseCount;
-          maybeSettleToolCalls(b);
-        }
-      } else if (type === 'result') {
-        const resultText = (msg as { result?: string }).result;
-        settle(b, { type: 'final', text: b.accumText || resultText || '' });
-        b.done = true;
-        break;
-      }
-    }
-  } catch (err) {
-    settle(b, { type: 'error', error: (err as Error).message });
-    b.done = true;
-  } finally {
-    if (b.done) {
-      if (b.timer) clearTimeout(b.timer);
-      if (bridges.get(b.sessionId) === b && b.pending.size === 0) bridges.delete(b.sessionId);
-    }
-  }
-}
-
-function buildMcpServer(b: Bridge, tools: OpenAITool[]) {
-  const defs = tools.map((t) =>
-    tool(
-      t.function.name,
-      t.function.description ?? '',
-      shapeFromProps(t.function.parameters),
-      makeHandler(b, t.function.name),
-    ),
+  const execTool = tool(
+    'exec',
+    'Execute a shell command on this machine and return its combined stdout/stderr.',
+    {
+      command: z.string().describe('Shell command to execute'),
+      workdir: z.string().optional().describe('Working directory (defaults to the session workspace)'),
+      timeout: z.number().optional().describe('Timeout in seconds'),
+    },
+    async (args) => {
+      const a = args as { command: string; workdir?: string; timeout?: number };
+      return new Promise((resolve) => {
+        execFile(
+          '/bin/sh',
+          ['-c', a.command],
+          { cwd: abs(cwd, a.workdir), timeout: a.timeout ? a.timeout * 1000 : EXEC_TIMEOUT_MS, maxBuffer: 1024 * 1024 * 16 },
+          (err, stdout, stderr) => {
+            let out = String(stdout ?? '');
+            if (stderr) out += (out ? '\n' : '') + '[stderr] ' + String(stderr);
+            if (err && !stdout && !stderr) out = `[error] ${err.message}`;
+            resolve(text(out || '(no output)'));
+          },
+        );
+      });
+    },
   );
-  return createSdkMcpServer({ name: MCP_SERVER, version: '1.0.0', tools: defs });
-}
 
-function extractTrailingToolResults(
-  messages: ReadonlyArray<{ role: string; content?: unknown; tool_call_id?: string }>,
-): Array<{ id: string; content: string }> {
-  const out: Array<{ id: string; content: string }> = [];
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (!m) break;
-    if (m.role === 'tool' && typeof m.tool_call_id === 'string') {
-      out.push({ id: m.tool_call_id, content: contentToText(m.content) });
-    } else if (m.role === 'assistant' || m.role === 'user' || m.role === 'system') {
-      break;
-    }
-  }
-  return out.reverse();
-}
-
-function contentToText(c: unknown): string {
-  if (typeof c === 'string') return c;
-  if (Array.isArray(c)) return c.map((p) => (p && typeof p === 'object' && 'text' in p ? String((p as { text: unknown }).text) : '')).join('');
-  if (c == null) return '';
-  return JSON.stringify(c);
-}
-
-function outcomeToResult(b: Bridge, outcome: Outcome): ToolChatResult {
-  if (outcome.type === 'error') throw new Error(outcome.error);
-  if (outcome.type === 'tool_calls') {
-    return {
-      finishReason: 'tool_calls',
-      content: outcome.text,
-      toolCalls: outcome.calls,
-      claudeSessionId: b.claudeSessionId,
-    };
-  }
-  return { finishReason: 'stop', content: outcome.text, claudeSessionId: b.claudeSessionId };
-}
-
-// Main entry: returns either tool_calls (Claude wants OpenClaw to run tools) or
-// final text. Subsequent calls with matching tool results continue the same turn.
-export async function handleToolChat(p: ToolChatParams): Promise<ToolChatResult> {
-  const trailingResults = extractTrailingToolResults(p.messages);
-  const existing = bridges.get(p.sessionId);
-
-  if (
-    existing &&
-    !existing.done &&
-    trailingResults.length > 0 &&
-    trailingResults.some((r) => existing.pending.has(r.id))
-  ) {
-    // Deliver results to the in-progress turn and await the next step.
-    const b = existing;
-    const outcome = await new Promise<Outcome>((resolve) => {
-      b.settled = false;
-      b.outcomeResolver = resolve;
-      touch(b);
-      for (const r of trailingResults) {
-        const fn = b.pending.get(r.id);
-        if (fn) {
-          b.pending.delete(r.id);
-          fn(r.content);
+  const readTool = tool(
+    'read',
+    'Read a file from disk.',
+    {
+      path: z.string().optional(),
+      file_path: z.string().optional(),
+      offset: z.number().optional().describe('Start line (1-based)'),
+      limit: z.number().optional().describe('Max lines to read'),
+    },
+    async (args) => {
+      const a = args as { path?: string; file_path?: string; offset?: number; limit?: number };
+      try {
+        let content = await readFile(abs(cwd, a.path ?? a.file_path), 'utf8');
+        if (a.offset || a.limit) {
+          const lines = content.split('\n');
+          const start = a.offset ? a.offset - 1 : 0;
+          content = lines.slice(start, a.limit ? start + a.limit : undefined).join('\n');
         }
+        return text(content);
+      } catch (e) {
+        return text(`[error] ${(e as Error).message}`);
       }
-    });
-    return outcomeToResult(b, outcome);
-  }
+    },
+  );
 
-  // New turn. Discard any stale in-progress bridge for this session.
-  if (existing) abortBridge(existing, 'superseded');
+  const writeTool = tool(
+    'write',
+    'Write (create or overwrite) a file on disk.',
+    {
+      content: z.string(),
+      path: z.string().optional(),
+      file_path: z.string().optional(),
+    },
+    async (args) => {
+      const a = args as { content: string; path?: string; file_path?: string };
+      const target = a.path ?? a.file_path;
+      if (!target) return text('[error] path is required');
+      try {
+        await writeFile(abs(cwd, target), a.content, 'utf8');
+        return text(`Wrote ${a.content.length} bytes to ${target}`);
+      } catch (e) {
+        return text(`[error] ${(e as Error).message}`);
+      }
+    },
+  );
 
-  const b: Bridge = {
-    sessionId: p.sessionId,
-    abort: new AbortController(),
-    claudeSessionId: p.resume ?? null,
-    pending: new Map(),
-    collected: [],
-    expected: 0,
-    accumText: '',
-    outcomeResolver: null,
-    settled: false,
-    done: false,
-    timer: null,
-  };
-  bridges.set(p.sessionId, b);
-  touch(b);
+  const editTool = tool(
+    'edit',
+    'Replace a string in a file on disk.',
+    {
+      path: z.string().optional(),
+      file_path: z.string().optional(),
+      oldText: z.string().optional(),
+      newText: z.string().optional(),
+      old_string: z.string().optional(),
+      new_string: z.string().optional(),
+    },
+    async (args) => {
+      const a = args as {
+        path?: string;
+        file_path?: string;
+        oldText?: string;
+        newText?: string;
+        old_string?: string;
+        new_string?: string;
+      };
+      const target = a.path ?? a.file_path;
+      const oldS = a.oldText ?? a.old_string ?? '';
+      const newS = a.newText ?? a.new_string ?? '';
+      if (!target) return text('[error] path is required');
+      try {
+        const before = await readFile(abs(cwd, target), 'utf8');
+        if (!before.includes(oldS)) return text('[error] oldText not found in file');
+        await writeFile(abs(cwd, target), before.replace(oldS, newS), 'utf8');
+        return text(`Edited ${target}`);
+      } catch (e) {
+        return text(`[error] ${(e as Error).message}`);
+      }
+    },
+  );
 
-  const mcpServer = buildMcpServer(b, p.tools);
-  const allowedTools = p.tools.map((t) => `mcp__${MCP_SERVER}__${t.function.name}`);
+  const webFetchTool = tool(
+    'web_fetch',
+    'Fetch a URL and return its text content.',
+    {
+      url: z.string(),
+      maxChars: z.number().optional(),
+    },
+    async (args) => {
+      const a = args as { url: string; maxChars?: number };
+      try {
+        const res = await fetch(a.url);
+        const body = await res.text();
+        const max = a.maxChars && a.maxChars > 0 ? a.maxChars : MAX_OUTPUT;
+        return text(body.slice(0, max));
+      } catch (e) {
+        return text(`[error] ${(e as Error).message}`);
+      }
+    },
+  );
 
-  const outcome = await new Promise<Outcome>((resolve) => {
-    b.outcomeResolver = resolve;
-    const q = query({
-      prompt: p.promptForNewTurn,
-      options: {
-        cwd: p.cwd,
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        mcpServers: { [MCP_SERVER]: mcpServer },
-        allowedTools,
-        abortController: b.abort,
-        ...(p.model ? { model: p.model } : {}),
-        ...(p.systemPrompt ? { systemPrompt: p.systemPrompt } : {}),
-        ...(p.resume ? { resume: p.resume } : {}),
-      },
-    });
-    void drive(b, q as AsyncIterable<unknown>);
+  return { exec: execTool, read: readTool, write: writeTool, edit: editTool, web_fetch: webFetchTool };
+}
+
+export async function runLocalToolChat(p: LocalToolChatParams): Promise<LocalToolChatResult> {
+  const all = buildLocalTools(p.cwd);
+  const wanted = new Set(p.requestedTools.map((t) => t.function.name));
+  const entries = Object.entries(all).filter(([name]) => wanted.has(name));
+  const defs = entries.map(([, def]) => def);
+  const allowedTools = entries.map(([name]) => `mcp__${MCP_SERVER}__${name}`);
+  const server = createSdkMcpServer({ name: MCP_SERVER, version: '1.0.0', tools: defs });
+
+  const q = query({
+    prompt: p.prompt,
+    options: {
+      cwd: p.cwd,
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
+      mcpServers: { [MCP_SERVER]: server },
+      allowedTools,
+      ...(p.model ? { model: p.model } : {}),
+      ...(p.systemPrompt ? { systemPrompt: p.systemPrompt } : {}),
+      ...(p.resume ? { resume: p.resume } : {}),
+      ...(p.signal ? { abortController: toAbort(p.signal) } : {}),
+    },
   });
 
-  return outcomeToResult(b, outcome);
+  let text = '';
+  let claudeSessionId: string | null = p.resume ?? null;
+  for await (const msg of q as AsyncIterable<Record<string, unknown>>) {
+    const type = msg.type as string;
+    if (type === 'system' && (msg as { subtype?: string }).subtype === 'init') {
+      const sid = (msg as { session_id?: string }).session_id;
+      if (sid) claudeSessionId = sid;
+    } else if (type === 'assistant') {
+      const content = (msg as { message?: { content?: Array<Record<string, unknown>> } }).message?.content ?? [];
+      for (const block of content) {
+        if (block.type === 'text' && typeof block.text === 'string') text += block.text;
+      }
+    } else if (type === 'result') {
+      const r = (msg as { result?: string }).result;
+      if (!text && typeof r === 'string') text = r;
+      break;
+    }
+  }
+  return { content: text, claudeSessionId };
 }
 
-export function bridgeActive(sessionId: string): boolean {
-  const b = bridges.get(sessionId);
-  return Boolean(b && !b.done);
+function toAbort(signal: AbortSignal): AbortController {
+  const ac = new AbortController();
+  if (signal.aborted) ac.abort();
+  else signal.addEventListener('abort', () => ac.abort(), { once: true });
+  return ac;
 }
