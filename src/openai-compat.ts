@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { sdkRunner, listSupportedModels } from './claude-sdk.js';
 import { ensureWorkspace } from './workspaces.js';
 import { getSession, setClaudeSessionId, upsertSession } from './sessions.js';
+import { handleToolChat, type OpenAITool } from './openai-tools-bridge.js';
 
 export const KHOI_LOCAL_MODEL_ID = 'khoi-local';
 const DEFAULT_SESSION_ID = 'openclaw';
@@ -50,6 +51,7 @@ interface ChatCompletionsBody {
   user?: string;
   temperature?: number;
   max_tokens?: number;
+  tools?: OpenAITool[];
 }
 
 function contentToText(c: OpenAIMessage['content']): string {
@@ -198,11 +200,96 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
       const existing = getSession(sessionId);
       upsertSession(sessionId, workspace);
 
-      const resumed = Boolean(existing?.claudeSessionId);
-      const prompt = buildPrompt(body.messages, resumed);
       const completionId = `chatcmpl-${randomUUID()}`;
       const created = Math.floor(Date.now() / 1000);
       const modelEcho = body.model || KHOI_LOCAL_MODEL_ID;
+
+      // Tool-calling bridge: when the caller (OpenClaw) sends tool definitions, route
+      // through the bridge so those tools fire via OpenAI tool_calls instead of Claude
+      // using its own native tools.
+      if (Array.isArray(body.tools) && body.tools.length > 0) {
+        const systems = body.messages
+          .filter((m) => m.role === 'system')
+          .map((m) => contentToText(m.content))
+          .join('\n\n');
+        const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
+        const promptForNewTurn = lastUser
+          ? contentToText(lastUser.content)
+          : flattenMessages(body.messages);
+
+        let result;
+        try {
+          result = await handleToolChat({
+            sessionId,
+            cwd: workspace,
+            resume: existing?.claudeSessionId ?? null,
+            model: normaliseModel(body.model),
+            systemPrompt: systems || undefined,
+            promptForNewTurn,
+            messages: body.messages,
+            tools: body.tools,
+          });
+        } catch (err) {
+          const msg = (err as Error).message;
+          if (body.stream) {
+            reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+            reply.raw.write(`data: ${JSON.stringify({ id: completionId, object: 'chat.completion.chunk', created, model: modelEcho, choices: [{ index: 0, delta: {}, finish_reason: 'error' }], error: { message: msg } })}\n\n`);
+            reply.raw.end();
+            return reply;
+          }
+          return reply.code(500).send({ error: { message: msg, type: 'internal_error' } });
+        }
+
+        if (result.claudeSessionId) setClaudeSessionId(sessionId, result.claudeSessionId);
+
+        const toolCalls = result.toolCalls?.map((c) => ({
+          id: c.id,
+          type: 'function' as const,
+          function: { name: c.name, arguments: c.arguments },
+        }));
+
+        if (body.stream) {
+          reply.raw.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+            'X-Accel-Buffering': 'no',
+          });
+          const chunk = (delta: Record<string, unknown>, finish: string | null = null) =>
+            reply.raw.write(
+              `data: ${JSON.stringify({ id: completionId, object: 'chat.completion.chunk', created, model: modelEcho, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`,
+            );
+          chunk({ role: 'assistant' });
+          if (result.content) chunk({ content: result.content });
+          if (toolCalls) chunk({ tool_calls: toolCalls.map((c, index) => ({ index, ...c })) });
+          chunk({}, result.finishReason);
+          reply.raw.write('data: [DONE]\n\n');
+          reply.raw.end();
+          return reply;
+        }
+
+        return reply.send({
+          id: completionId,
+          object: 'chat.completion',
+          created,
+          model: modelEcho,
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: result.content || null,
+                ...(toolCalls ? { tool_calls: toolCalls } : {}),
+              },
+              finish_reason: result.finishReason,
+            },
+          ],
+          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        });
+      }
+
+      const resumed = Boolean(existing?.claudeSessionId);
+      const prompt = buildPrompt(body.messages, resumed);
 
       const abort = new AbortController();
       const onClose = () => {
