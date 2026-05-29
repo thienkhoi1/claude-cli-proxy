@@ -6,7 +6,8 @@ import fastifySwagger from '@fastify/swagger';
 import fastifySwaggerUi from '@fastify/swagger-ui';
 import { mkdirSync } from 'node:fs';
 import { HOST, PORT, WORKSPACES_DIR } from './config.js';
-import { sdkRunner, listSupportedModels } from './claude-sdk.js';
+import { listSupportedModels } from './claude-sdk.js';
+import { activeRunner } from './runner.js';
 import { ensureWorkspace } from './workspaces.js';
 import {
   closeDb,
@@ -171,7 +172,7 @@ app.post<{ Body: ChatBody }>(
     });
 
     try {
-      const stream = sdkRunner.run({
+      const stream = activeRunner.run({
         prompt: body.prompt,
         cwd: workspace,
         resume: session.claudeSessionId,

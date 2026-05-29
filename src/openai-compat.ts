@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
-import { sdkRunner, listSupportedModels } from './claude-sdk.js';
+import { listSupportedModels } from './claude-sdk.js';
+import { activeRunner } from './runner.js';
 import { ensureWorkspace } from './workspaces.js';
 import { getSession, setClaudeSessionId, upsertSession } from './sessions.js';
 import { runLocalToolChat, type OpenAITool } from './openai-tools-bridge.js';
@@ -287,7 +288,7 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
 
       const requestedModel = normaliseModel(body.model);
       const runClaude = async function* () {
-        const stream = sdkRunner.run({
+        const stream = activeRunner.run({
           prompt,
           cwd: workspace,
           resume: capturedClaudeId,
