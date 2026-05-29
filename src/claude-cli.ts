@@ -36,13 +36,16 @@ export async function* runClaudeCli(opts: CliRunOptions): AsyncGenerator<Record<
     writeFileSync(file, opts.appendSystemPrompt, 'utf8');
     args.push('--append-system-prompt-file', file);
   }
-  args.push(opts.prompt);
 
+  // The prompt is passed via STDIN, not argv: OpenClaw sends large conversations
+  // and a long prompt as a command-line argument overflows the OS arg limit (E2BIG).
   const child = spawn(bin, args, {
     cwd: opts.cwd,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
     env: process.env,
   });
+  child.stdin.write(opts.prompt);
+  child.stdin.end();
 
   if (opts.signal) {
     if (opts.signal.aborted) child.kill('SIGTERM');
