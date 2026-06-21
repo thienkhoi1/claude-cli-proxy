@@ -10,6 +10,24 @@ export const PORT = 3000;
 // the CLI's own default model is used. Example: claude-sonnet-4-6.
 export const DEFAULT_MODEL = process.env.PROXY_DEFAULT_MODEL || undefined;
 
+function readPositiveInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+// Cap on concurrent `claude` subprocesses. Heavy multi-agent OpenClaw runs fan out
+// many parallel sub-agent turns; without a cap the bursty load trips short-window
+// rate limits at the backend. Excess requests queue and run as slots free up.
+export const MAX_CONCURRENCY = readPositiveInt('PROXY_MAX_CONCURRENCY', 2);
+// Rate-limit retry: when an assistant message arrives with error='rate_limit' (or
+// 'server_error') BEFORE any content has been yielded, we transparently retry
+// with exponential backoff (base, base*2, base*4, …). After MAX retries the
+// error surfaces to the caller unchanged.
+export const RATE_RETRY_MAX = readPositiveInt('PROXY_RATE_RETRY_MAX', 3);
+export const RATE_RETRY_BASE_MS = readPositiveInt('PROXY_RATE_RETRY_BASE_MS', 30_000);
+
 export const PROJECT_ROOT = process.cwd();
 export const WORKSPACES_DIR = join(PROJECT_ROOT, 'workspaces');
 export const PROJECTS_JSON = join(PROJECT_ROOT, 'projects.json');
