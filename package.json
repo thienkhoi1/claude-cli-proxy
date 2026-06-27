@@ -1,14 +1,38 @@
 {
-  "name": "claude-cli-proxy",
+  "name": "@thienkhoi1/claude-cli-proxy",
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "description": "Local HTTP/SSE gateway that wraps the Claude CLI as an OpenAI-compatible API.",
+  "license": "MIT",
+  "author": "thienkhoi1",
+  "homepage": "https://github.com/thienkhoi1/claude-cli-proxy",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/thienkhoi1/claude-cli-proxy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/thienkhoi1/claude-cli-proxy/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "dist/server.js",
+  "bin": {
+    "claude-cli-proxy": "dist/server.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "setup": "bash scripts/setup.sh",
     "smoke": "tsx src/test-auth.ts",
-    "dev": "PROXY_DEFAULT_MODEL=${PROXY_DEFAULT_MODEL:-claude-sonnet-4-6} tsx watch src/server.ts",
-    "start": "PROXY_DEFAULT_MODEL=${PROXY_DEFAULT_MODEL:-claude-sonnet-4-6} tsx src/server.ts",
+    "dev": "PROXY_DATA_DIR=${PROXY_DATA_DIR:-$PWD} tsx watch src/server.ts",
+    "start": "PROXY_DATA_DIR=${PROXY_DATA_DIR:-$PWD} tsx src/server.ts",
     "build": "tsc",
+    "prepare": "tsc",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

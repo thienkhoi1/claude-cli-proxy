@@ -30,9 +30,33 @@ restarts.
 
 ---
 
+## Install
+
+If you just want to run the proxy (not hack on it):
+
+```bash
+# one-time on this machine
+claude login                                # use your own Claude subscription
+
+# every time you want the proxy
+npx github:thienkhoi1/claude-cli-proxy
+```
+
+First run clones the repo, compiles TypeScript, and builds the `better-sqlite3`
+native module — expect 10–30s. Subsequent `npx` calls reuse npm's cache and
+start in ~1s. State (sessions DB, workspaces, `projects.json`) lives under
+`~/.claude-cli-proxy/` — override with `PROXY_DATA_DIR=/some/path`.
+
+Pin a version with `npx github:thienkhoi1/claude-cli-proxy#v0.1.0` once tags
+exist. Without a tag, npx tracks `main`.
+
+To hack on it instead, follow [Quick start](#quick-start-recommended) below.
+
+---
+
 ## Prerequisites
 
-- **Node.js 18+** (Node 20 recommended; we ship `tsx` for direct TS execution).
+- **Node.js 22+** (the `engines` field enforces this).
 - **The `claude` CLI installed and logged in.** Install instructions:
   <https://docs.claude.com/claude-code>. After install, run `claude` once in a
   terminal to complete OAuth.

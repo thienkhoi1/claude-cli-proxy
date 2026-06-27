@@ -1,4 +1,5 @@
 import { execSync } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -6,9 +7,8 @@ export const HOST = '127.0.0.1';
 export const PORT = 3000;
 
 // Default Claude model for requests that don't specify one (e.g. OpenClaw, which
-// sends the `khoi-local` alias). Per-machine via PROXY_DEFAULT_MODEL. When unset,
-// the CLI's own default model is used. Example: claude-sonnet-4-6.
-export const DEFAULT_MODEL = process.env.PROXY_DEFAULT_MODEL || undefined;
+// sends the `khoi-local` alias). Per-machine via PROXY_DEFAULT_MODEL.
+export const DEFAULT_MODEL = process.env.PROXY_DEFAULT_MODEL || 'claude-sonnet-4-6';
 
 function readPositiveInt(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -28,12 +28,17 @@ export const MAX_CONCURRENCY = readPositiveInt('PROXY_MAX_CONCURRENCY', 2);
 export const RATE_RETRY_MAX = readPositiveInt('PROXY_RATE_RETRY_MAX', 3);
 export const RATE_RETRY_BASE_MS = readPositiveInt('PROXY_RATE_RETRY_BASE_MS', 30_000);
 
-export const PROJECT_ROOT = process.cwd();
-export const WORKSPACES_DIR = join(PROJECT_ROOT, 'workspaces');
-export const PROJECTS_JSON = join(PROJECT_ROOT, 'projects.json');
-export const DB_PATH = join(PROJECT_ROOT, 'sessions.db');
-
 export const HOME = homedir();
+
+// Where the proxy keeps its sessions DB, workspaces, and projects.json. Defaults
+// to ~/.claude-cli-proxy so `npx` installs work from any cwd. Override with
+// PROXY_DATA_DIR — local dev (npm start) sets it to the repo root so the
+// existing sessions.db / workspaces/ keep working.
+export const DATA_DIR = process.env.PROXY_DATA_DIR || join(HOME, '.claude-cli-proxy');
+mkdirSync(DATA_DIR, { recursive: true });
+export const WORKSPACES_DIR = join(DATA_DIR, 'workspaces');
+export const PROJECTS_JSON = join(DATA_DIR, 'projects.json');
+export const DB_PATH = join(DATA_DIR, 'sessions.db');
 
 // Path to the OFFICIAL `claude` CLI installed on this machine. The Agent SDK
 // otherwise spawns its own bundled engine, which Anthropic bills as a
