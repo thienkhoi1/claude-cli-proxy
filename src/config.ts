@@ -1,7 +1,44 @@
 import { execSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+
+// Load a .env file BEFORE any other config is read, so file values can fill in
+// PROXY_* defaults. Search order:
+//   1. PROXY_ENV_FILE if set explicitly
+//   2. <PROXY_DATA_DIR or ~/.claude-cli-proxy>/.env
+//   3. ./.env (cwd)
+// Existing process.env keys WIN — the file fills gaps only. Lines starting
+// with `#` are comments; surrounding quotes on values are stripped.
+function loadDotEnv(): void {
+  const home = homedir();
+  const dataDir = process.env.PROXY_DATA_DIR || join(home, '.claude-cli-proxy');
+  const candidates = [
+    process.env.PROXY_ENV_FILE,
+    join(dataDir, '.env'),
+    join(process.cwd(), '.env'),
+  ].filter((p): p is string => !!p);
+  for (const file of candidates) {
+    if (!existsSync(file)) continue;
+    for (const raw of readFileSync(file, 'utf8').split('\n')) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      const eq = line.indexOf('=');
+      if (eq < 0) continue;
+      const key = line.slice(0, eq).trim();
+      let value = line.slice(eq + 1).trim();
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+      if (key && !(key in process.env)) process.env[key] = value;
+    }
+    break;
+  }
+}
+loadDotEnv();
 
 export const HOST = process.env.PROXY_HOST || '127.0.0.1';
 export const PORT = readPositiveInt('PROXY_PORT', 3000);

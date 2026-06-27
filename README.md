@@ -50,6 +50,24 @@ start in ~1s. State (sessions DB, workspaces, `projects.json`) lives under
 Bind address/port are env-overridable: `PROXY_HOST` (default `127.0.0.1`) and
 `PROXY_PORT` (default `3000`). Example: `PROXY_PORT=3099 npx github:thienkhoi1/claude-cli-proxy`.
 
+### Persistent config via `.env`
+
+Instead of exporting env vars each time, drop a `.env` file in
+`~/.claude-cli-proxy/.env` (or the cwd you launch from) and the proxy will
+auto-load it on startup. Grab the template:
+
+```bash
+mkdir -p ~/.claude-cli-proxy
+curl -fsSL https://raw.githubusercontent.com/thienkhoi1/claude-cli-proxy/main/.env.example \
+  -o ~/.claude-cli-proxy/.env
+# edit the values you want, then:
+npx github:thienkhoi1/claude-cli-proxy
+```
+
+Every `PROXY_*` setting in the file is optional. Existing shell env vars
+always win over the file. Lookup order: `PROXY_ENV_FILE` → `$PROXY_DATA_DIR/.env`
+→ `./.env`.
+
 Pin a version with `npx github:thienkhoi1/claude-cli-proxy#v0.1.0` once tags
 exist. Without a tag, npx tracks `main`.
 
