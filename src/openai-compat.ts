@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { listSupportedModels } from './claude-sdk.js';
 import { activeRunner } from './runner.js';
 import { ensureWorkspace } from './workspaces.js';
@@ -7,7 +7,25 @@ import { setClaudeSessionId, upsertSession } from './sessions.js';
 import { runLocalToolChat, type OpenAITool } from './openai-tools-bridge.js';
 
 export const KHOI_LOCAL_MODEL_ID = 'khoi-local';
-const DEFAULT_SESSION_ID = 'openclaw';
+const DEFAULT_SESSION_PREFIX = 'openclaw';
+
+// Multiple OpenClaw agents (jan/lily/bob/…) all hit this single proxy without
+// passing a per-agent `user` field, so falling back to one shared sessionId would
+// collide their workspaces and let concurrent file edits clobber each other. Each
+// agent's system prompt embeds its own identity, so a short fingerprint of the
+// joined system messages gives a stable per-agent sessionId — same agent across
+// turns → same hash → same workspace; different agent → different workspace.
+function deriveSessionId(body: ChatCompletionsBody): string {
+  const explicit = body.user?.trim();
+  if (explicit) return explicit;
+  const systems = body.messages
+    .filter((m) => m.role === 'system')
+    .map((m) => contentToText(m.content))
+    .join('\n');
+  if (!systems) return DEFAULT_SESSION_PREFIX;
+  const fp = createHash('sha1').update(systems).digest('hex').slice(0, 10);
+  return `${DEFAULT_SESSION_PREFIX}-${fp}`;
+}
 
 // Callers of the OpenAI-compatible endpoint (e.g. OpenClaw) send their own tool
 // definitions and a system prompt that instructs the model to call an external
@@ -199,7 +217,7 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
         });
       }
 
-      const sessionId = body.user?.trim() || DEFAULT_SESSION_ID;
+      const sessionId = deriveSessionId(body);
       let workspace: string;
       try {
         workspace = ensureWorkspace(sessionId);
