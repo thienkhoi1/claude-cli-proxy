@@ -7,6 +7,9 @@ WebFetch, Task, MCP, …) over HTTP/SSE.
 Single-user, localhost-only. Uses your existing `claude` CLI OAuth login — no
 `ANTHROPIC_API_KEY` needed. Internal project; not for public deploy.
 
+> **Just want to run the proxy?** See **[SETUP.md](SETUP.md)** — short, end-user
+> focused, no contributor noise.
+
 ---
 
 ## What you get
