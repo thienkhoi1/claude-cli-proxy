@@ -41,15 +41,29 @@ function acquireSlot(signal?: AbortSignal): Promise<() => void> {
         const next = slotWaiters.shift();
         if (next) next();
         else activeSlots--;
+        console.error(
+          `[claude-cli] slot.release active=${activeSlots}/${MAX_CONCURRENCY} waiters=${slotWaiters.length}`,
+        );
       });
     };
     if (activeSlots < MAX_CONCURRENCY) {
       activeSlots++;
+      console.error(
+        `[claude-cli] slot.acquire active=${activeSlots}/${MAX_CONCURRENCY} waiters=${slotWaiters.length}`,
+      );
       grant();
       return;
     }
+    console.error(
+      `[claude-cli] slot.queue active=${activeSlots}/${MAX_CONCURRENCY} waiters=${slotWaiters.length + 1}`,
+    );
     const waiter = () => {
       cleanup();
+      // Slot was handed off from the previous holder — activeSlots was NOT
+      // decremented in release(), and we do NOT increment here. Net zero.
+      console.error(
+        `[claude-cli] slot.acquire (from queue) active=${activeSlots}/${MAX_CONCURRENCY} waiters=${slotWaiters.length}`,
+      );
       grant();
     };
     const onAbort = () => {
@@ -97,6 +111,48 @@ const RETRIABLE_ASSISTANT_ERRORS = new Set(['rate_limit', 'server_error']);
 
 function backoffMs(attempt: number): number {
   return RATE_RETRY_BASE_MS * Math.pow(2, attempt);
+}
+
+// Lightweight observation of CLI stream events. We don't log every message
+// (assistant text blocks would flood the log); we log only the ones that tell
+// us how a turn started/ended or that an error occurred, so the cause of a
+// failed/retried request is visible after the fact.
+function logCliEvent(msg: Record<string, unknown>): void {
+  const t = msg.type as string | undefined;
+  if (t === 'system' && (msg as { subtype?: string }).subtype === 'init') {
+    const sid = (msg as { session_id?: string }).session_id;
+    const model = (msg as { model?: string }).model;
+    console.error(`[claude-cli] init session=${sid ?? '?'} model=${model ?? '?'}`);
+    return;
+  }
+  if (t === 'assistant') {
+    const err = (msg as { error?: string }).error;
+    if (err) console.error(`[claude-cli] assistant.error=${err}`);
+    return;
+  }
+  if (t === 'result') {
+    const subtype = (msg as { subtype?: string }).subtype;
+    const isErr = (msg as { is_error?: boolean }).is_error;
+    if (subtype !== 'success' || isErr) {
+      const errs = (msg as { errors?: unknown }).errors;
+      const errStr = Array.isArray(errs) ? errs.map(String).join(' | ') : '';
+      console.error(
+        `[claude-cli] result.subtype=${subtype ?? '?'} is_error=${Boolean(isErr)} errors=${errStr.slice(0, 400)}`,
+      );
+    }
+    return;
+  }
+  if (t === 'rate_limit_event') {
+    const info = (msg as { rate_limit_info?: Record<string, unknown> }).rate_limit_info ?? {};
+    const status = info.status as string | undefined;
+    const overage = info.overageStatus as string | undefined;
+    if (status && status !== 'allowed') {
+      console.error(
+        `[claude-cli] rate_limit_event status=${status} overage=${overage ?? '?'} type=${info.rateLimitType ?? '?'} resetsAt=${info.resetsAt ?? '?'}`,
+      );
+    }
+    return;
+  }
 }
 
 // Single attempt — spawns one `claude` subprocess and yields its stream-json
@@ -175,13 +231,22 @@ async function* spawnAndStream(
     finished = true;
     bump();
   });
-  child.on('close', (code) => {
+  child.on('close', (code, signal) => {
     if (buffer.trim()) {
       try {
         queue.push(JSON.parse(buffer.trim()) as Record<string, unknown>);
       } catch {
         /* ignore */
       }
+    }
+    // Always log non-success exits so the cause is visible whether queue.length
+    // is 0 or not (an exit-after-init still leaves init in the queue but the
+    // turn is broken).
+    if (code !== 0 || signal) {
+      const stderrTail = stderr.slice(-800).replace(/\s+$/, '');
+      console.error(
+        `[claude-cli] child.close code=${code} signal=${signal ?? 'none'} queuedAfter=${queue.length} stderr="${stderrTail}"`,
+      );
     }
     if (code !== 0 && queue.length === 0) {
       failure = new Error(`claude CLI exited with code ${code}: ${stderr.slice(0, 800)}`);
@@ -192,13 +257,21 @@ async function* spawnAndStream(
 
   try {
     while (true) {
-      while (queue.length) yield queue.shift() as Record<string, unknown>;
+      while (queue.length) {
+        const m = queue.shift() as Record<string, unknown>;
+        logCliEvent(m);
+        yield m;
+      }
       if (finished) break;
       await new Promise<void>((resolve) => {
         wake = resolve;
       });
     }
-    while (queue.length) yield queue.shift() as Record<string, unknown>;
+    while (queue.length) {
+      const m = queue.shift() as Record<string, unknown>;
+      logCliEvent(m);
+      yield m;
+    }
     if (failure) throw failure;
   } finally {
     if (child.exitCode === null && !child.killed) child.kill('SIGTERM');

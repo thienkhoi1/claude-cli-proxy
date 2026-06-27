@@ -6,8 +6,8 @@
   "scripts": {
     "setup": "bash scripts/setup.sh",
     "smoke": "tsx src/test-auth.ts",
-    "dev": "tsx watch src/server.ts",
-    "start": "tsx src/server.ts",
+    "dev": "PROXY_DEFAULT_MODEL=${PROXY_DEFAULT_MODEL:-claude-sonnet-4-6} tsx watch src/server.ts",
+    "start": "PROXY_DEFAULT_MODEL=${PROXY_DEFAULT_MODEL:-claude-sonnet-4-6} tsx src/server.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit"
   },

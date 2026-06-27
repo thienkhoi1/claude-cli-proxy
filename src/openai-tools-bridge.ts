@@ -5,7 +5,12 @@
 // instead Claude does the work with its OWN native tools (Bash/Read/Edit/Write/
 // WebFetch), which already run on this machine with permissions bypassed. A
 // directive maps OpenClaw's tool names onto Claude's native tools so it never
-// stalls on an "unavailable" external tool. The whole turn finishes in one call.
+// stalls on an "unavailable" external tool.
+//
+// This module emits an async stream of typed events so the caller can forward
+// assistant text chunks to the client as soon as they arrive — OpenClaw aborts
+// the connection if no real `data:` chunk lands within ~60s, so buffering to
+// the end of the turn is fatal for long tool runs.
 import { runClaudeCli } from './claude-cli.js';
 
 export interface OpenAITool {
@@ -22,10 +27,10 @@ export interface LocalToolChatParams {
   requestedTools: OpenAITool[];
   signal?: AbortSignal;
 }
-export interface LocalToolChatResult {
-  content: string;
-  claudeSessionId: string | null;
-}
+
+export type LocalToolChatEvent =
+  | { type: 'text'; text: string }
+  | { type: 'done'; content: string; claudeSessionId: string | null };
 
 const TOOL_DIRECTIVE =
   'You are an autonomous agent running on this machine with full access to your ' +
@@ -37,7 +42,9 @@ const TOOL_DIRECTIVE =
   'for web_fetch). Always do the work directly with your native tools and report the ' +
   'result; never say a tool is unavailable without first using your own tools.';
 
-export async function runLocalToolChat(p: LocalToolChatParams): Promise<LocalToolChatResult> {
+export async function* runLocalToolChat(
+  p: LocalToolChatParams,
+): AsyncGenerator<LocalToolChatEvent> {
   const append = [p.systemPrompt, TOOL_DIRECTIVE].filter(Boolean).join('\n\n');
 
   let content = '';
@@ -54,17 +61,30 @@ export async function runLocalToolChat(p: LocalToolChatParams): Promise<LocalToo
     if (type === 'system' && (msg as { subtype?: string }).subtype === 'init') {
       const sid = (msg as { session_id?: string }).session_id;
       if (sid) claudeSessionId = sid;
-    } else if (type === 'assistant') {
+      continue;
+    }
+    if (type === 'assistant') {
       const blocks =
         (msg as { message?: { content?: Array<Record<string, unknown>> } }).message?.content ?? [];
       for (const block of blocks) {
-        if (block.type === 'text' && typeof block.text === 'string') content += block.text;
+        if (block.type === 'text' && typeof block.text === 'string' && block.text.length) {
+          content += block.text;
+          yield { type: 'text', text: block.text };
+        }
       }
-    } else if (type === 'result') {
+      continue;
+    }
+    if (type === 'result') {
+      // Fallback for the rare case where no streaming text blocks came through
+      // but the result message carries the answer — emit it as one chunk so
+      // streaming consumers still see content.
       const r = (msg as { result?: string }).result;
-      if (!content && typeof r === 'string') content = r;
+      if (!content && typeof r === 'string' && r.length) {
+        content = r;
+        yield { type: 'text', text: r };
+      }
       break;
     }
   }
-  return { content, claudeSessionId };
+  yield { type: 'done', content, claudeSessionId };
 }

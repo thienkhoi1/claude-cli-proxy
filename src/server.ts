@@ -158,6 +158,10 @@ app.post<{ Body: ChatBody }>(
 
     const session = upsertSession(body.sessionId, workspace);
 
+    console.error(
+      `[proxy] /chat sessionId=${body.sessionId} model=${body.model ?? '(default)'} promptLen=${body.prompt.length} resume=${Boolean(session.claudeSessionId)}`,
+    );
+
     reply.raw.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',

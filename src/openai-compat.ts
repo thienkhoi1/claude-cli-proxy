@@ -211,13 +211,25 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
 
       upsertSession(sessionId, workspace);
 
+      const toolsCount = Array.isArray(body.tools) ? body.tools.length : 0;
+      const lastUser = [...body.messages].reverse().find((m) => m.role === 'user');
+      const lastUserText = lastUser ? contentToText(lastUser.content).slice(0, 80) : '';
+      console.error(
+        `[proxy] /v1/chat sessionId=${sessionId} model=${body.model ?? '(none)'} msgs=${body.messages.length} tools=${toolsCount} stream=${Boolean(body.stream)} lastUser="${lastUserText.replace(/\s+/g, ' ')}"`,
+      );
+
       const completionId = `chatcmpl-${randomUUID()}`;
       const created = Math.floor(Date.now() / 1000);
       const modelEcho = body.model || KHOI_LOCAL_MODEL_ID;
 
+      const reqStart = Date.now();
+      const ts = () => `+${Date.now() - reqStart}ms`;
       const abort = new AbortController();
       const onClose = () => {
-        if (!reply.raw.writableEnded) abort.abort();
+        if (!reply.raw.writableEnded) {
+          console.error(`[proxy] /v1/chat client.close ${ts()} sessionId=${sessionId}`);
+          abort.abort();
+        }
       };
       reply.raw.on('close', onClose);
 
@@ -231,30 +243,16 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
           .map((m) => contentToText(m.content))
           .join('\n\n');
 
-        let result;
-        try {
-          // Stateless: send the full conversation each call, no resume, so distinct
-          // OpenClaw conversations never merge into a single shared Claude thread.
-          result = await runLocalToolChat({
-            cwd: workspace,
-            resume: null,
-            model: normaliseModel(body.model),
-            systemPrompt: systems || undefined,
-            prompt: flattenConversation(body.messages),
-            requestedTools: body.tools,
-            signal: abort.signal,
-          });
-        } catch (err) {
-          const msg = (err as Error).message;
-          if (body.stream) {
-            reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
-            reply.raw.write(`data: ${JSON.stringify({ id: completionId, object: 'chat.completion.chunk', created, model: modelEcho, choices: [{ index: 0, delta: {}, finish_reason: 'error' }], error: { message: msg } })}\n\n`);
-            reply.raw.end();
-            return reply;
-          }
-          return reply.code(500).send({ error: { message: msg, type: 'internal_error' } });
-        }
-
+        // For stream=true we open the SSE response BEFORE driving the CLI so
+        // OpenAI-shaped clients see bytes immediately. The new runLocalToolChat
+        // is an async generator that yields each assistant text block as it
+        // arrives — those are forwarded as real `data:` chunks, which is what
+        // OpenClaw's progress detector actually counts (SSE `:` comments alone
+        // are treated as silence and trigger its ~60s abort).
+        let toolChunk:
+          | ((delta: Record<string, unknown>, finish?: string | null) => void)
+          | null = null;
+        let keepAlive: ReturnType<typeof setInterval> | null = null;
         if (body.stream) {
           reply.raw.writeHead(200, {
             'Content-Type': 'text/event-stream',
@@ -262,13 +260,79 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
             Connection: 'keep-alive',
             'X-Accel-Buffering': 'no',
           });
-          const chunk = (delta: Record<string, unknown>, finish: string | null = null) =>
+          console.error(`[proxy] /v1/chat sse.open ${ts()} sessionId=${sessionId}`);
+          toolChunk = (delta, finish = null) =>
             reply.raw.write(
               `data: ${JSON.stringify({ id: completionId, object: 'chat.completion.chunk', created, model: modelEcho, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`,
             );
-          chunk({ role: 'assistant' });
-          if (result.content) chunk({ content: result.content });
-          chunk({}, 'stop');
+          toolChunk({ role: 'assistant' });
+          console.error(`[proxy] /v1/chat sse.role-chunk ${ts()} sessionId=${sessionId}`);
+          // Heartbeat: OpenClaw aborts after ~60s of no `data: {content}` chunks
+          // (SSE `:` comments are treated as silence). When Claude is running
+          // native tools between text emissions that 60s window can elapse, so we
+          // emit a zero-width space (U+200B) every 25s — counted as real content
+          // by the consumer but invisible to the user.
+          keepAlive = setInterval(() => {
+            if (!reply.raw.writableEnded && toolChunk) {
+              toolChunk({ content: '​' });
+              console.error(`[proxy] /v1/chat sse.heartbeat ${ts()} sessionId=${sessionId}`);
+            }
+          }, 25_000);
+        }
+
+        let accumulated = '';
+        let claudeSessionId: string | null = null;
+        let firstChunkLogged = false;
+        try {
+          for await (const evt of runLocalToolChat({
+            // Stateless: send the full conversation each call, no resume, so distinct
+            // OpenClaw conversations never merge into a single shared Claude thread.
+            cwd: workspace,
+            resume: null,
+            model: normaliseModel(body.model),
+            systemPrompt: systems || undefined,
+            prompt: flattenConversation(body.messages),
+            requestedTools: body.tools,
+            signal: abort.signal,
+          })) {
+            if (evt.type === 'text') {
+              accumulated += evt.text;
+              if (body.stream && toolChunk) {
+                toolChunk({ content: evt.text });
+                if (!firstChunkLogged) {
+                  console.error(
+                    `[proxy] /v1/chat sse.first-text ${ts()} sessionId=${sessionId} len=${evt.text.length}`,
+                  );
+                  firstChunkLogged = true;
+                }
+              }
+            } else if (evt.type === 'done') {
+              claudeSessionId = evt.claudeSessionId;
+              if (!accumulated && evt.content) accumulated = evt.content;
+            }
+          }
+        } catch (err) {
+          if (keepAlive) clearInterval(keepAlive);
+          const msg = (err as Error).message;
+          console.error(
+            `[proxy] /v1/chat tool-mode error ${ts()} sessionId=${sessionId} aborted=${abort.signal.aborted} msg="${msg.slice(0, 400)}"`,
+          );
+          if (body.stream && toolChunk) {
+            toolChunk({}, 'error');
+            reply.raw.write(`data: ${JSON.stringify({ id: completionId, error: { message: msg } })}\n\n`);
+            reply.raw.write('data: [DONE]\n\n');
+            reply.raw.end();
+            return reply;
+          }
+          return reply.code(500).send({ error: { message: msg, type: 'internal_error' } });
+        }
+        if (keepAlive) clearInterval(keepAlive);
+        console.error(
+          `[proxy] /v1/chat tool-mode done ${ts()} sessionId=${sessionId} contentLen=${accumulated.length} claudeSessionId=${claudeSessionId ?? '?'}`,
+        );
+
+        if (body.stream && toolChunk) {
+          toolChunk({}, 'stop');
           reply.raw.write('data: [DONE]\n\n');
           reply.raw.end();
           return reply;
@@ -282,7 +346,7 @@ export function registerOpenAIRoutes(app: FastifyInstance): void {
           choices: [
             {
               index: 0,
-              message: { role: 'assistant', content: result.content || '' },
+              message: { role: 'assistant', content: accumulated || '' },
               finish_reason: 'stop',
             },
           ],
