@@ -3,8 +3,8 @@ import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-export const HOST = '127.0.0.1';
-export const PORT = 3000;
+export const HOST = process.env.PROXY_HOST || '127.0.0.1';
+export const PORT = readPositiveInt('PROXY_PORT', 3000);
 
 // Default Claude model for requests that don't specify one (e.g. OpenClaw, which
 // sends the `khoi-local` alias). Per-machine via PROXY_DEFAULT_MODEL.

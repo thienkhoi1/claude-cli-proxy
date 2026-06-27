@@ -47,6 +47,9 @@ native module — expect 10–30s. Subsequent `npx` calls reuse npm's cache and
 start in ~1s. State (sessions DB, workspaces, `projects.json`) lives under
 `~/.claude-cli-proxy/` — override with `PROXY_DATA_DIR=/some/path`.
 
+Bind address/port are env-overridable: `PROXY_HOST` (default `127.0.0.1`) and
+`PROXY_PORT` (default `3000`). Example: `PROXY_PORT=3099 npx github:thienkhoi1/claude-cli-proxy`.
+
 Pin a version with `npx github:thienkhoi1/claude-cli-proxy#v0.1.0` once tags
 exist. Without a tag, npx tracks `main`.
 
