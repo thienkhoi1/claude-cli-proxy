@@ -189,9 +189,14 @@ async function* spawnAndStream(
   child.stdin.write(opts.prompt);
   child.stdin.end();
 
+  let weKilled = false;
+  const killChild = () => {
+    weKilled = true;
+    child.kill('SIGTERM');
+  };
   if (opts.signal) {
-    if (opts.signal.aborted) child.kill('SIGTERM');
-    else opts.signal.addEventListener('abort', () => child.kill('SIGTERM'), { once: true });
+    if (opts.signal.aborted) killChild();
+    else opts.signal.addEventListener('abort', killChild, { once: true });
   }
 
   const queue: Array<Record<string, unknown>> = [];
@@ -239,16 +244,18 @@ async function* spawnAndStream(
         /* ignore */
       }
     }
-    // Always log non-success exits so the cause is visible whether queue.length
-    // is 0 or not (an exit-after-init still leaves init in the queue but the
-    // turn is broken).
+    // Log non-success exits so the cause is visible. If WE sent the SIGTERM
+    // (client disconnected, server shutting down, generator closed early)
+    // it's expected, not an error — log as info and don't surface as a thrown
+    // failure. Real CLI failures (non-zero with stderr, or signals we didn't
+    // send) still log at error and throw.
     if (code !== 0 || signal) {
       const stderrTail = stderr.slice(-800).replace(/\s+$/, '');
-      console.error(
-        `[claude-cli] child.close code=${code} signal=${signal ?? 'none'} queuedAfter=${queue.length} stderr="${stderrTail}"`,
-      );
+      const line = `[claude-cli] child.close code=${code} signal=${signal ?? 'none'} queuedAfter=${queue.length} stderr="${stderrTail}"`;
+      if (weKilled) console.log(line + ' (aborted by proxy)');
+      else console.error(line);
     }
-    if (code !== 0 && queue.length === 0) {
+    if (code !== 0 && queue.length === 0 && !weKilled) {
       failure = new Error(`claude CLI exited with code ${code}: ${stderr.slice(0, 800)}`);
     }
     finished = true;
@@ -274,7 +281,7 @@ async function* spawnAndStream(
     }
     if (failure) throw failure;
   } finally {
-    if (child.exitCode === null && !child.killed) child.kill('SIGTERM');
+    if (child.exitCode === null && !child.killed) killChild();
   }
 }
 
