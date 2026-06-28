@@ -1,6 +1,6 @@
 {
   "name": "@thienkhoi1/claude-cli-proxy",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "type": "module",
   "description": "Local HTTP/SSE gateway that wraps the Claude CLI as an OpenAI-compatible API.",
